@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, date
 from datetime import timezone as tz
 from jinja2 import ChoiceLoader, FileSystemLoader
 from jupyterhub.handlers import BaseHandler
@@ -49,6 +49,8 @@ class SignUpHandler(LocalBase):
     def get_result_message(self, user, taken, human=True):
         alert = 'alert-info'
         message = 'Your information has been sent to the admin'
+        if user and user.login_email_sent:
+            message = 'Check your email to authorize your access'
 
         # Always error if username is taken.
         if taken:
@@ -191,14 +193,34 @@ class AuthorizeHandler(LocalBase):
     # static method so it can be easily tested without initializate the class
     @staticmethod
     def validate_slug(slug, key):
-        from django.core.signing import Signer, BadSignature
+        from .crypto.signing import Signer, BadSignature
         s = Signer(key)
         try:
             obj = s.unsign_object(slug)
         except BadSignature as e:
             raise ValueError(e)
 
-        obj["expire"] = datetime.fromisoformat(obj["expire"])
+        # the following it is not supported in earlier versions of python
+        # obj["expire"] = datetime.fromisoformat(obj["expire"])
+
+        # format="%Y-%m-%dT%H:%M:%S.%f"
+        datestr, timestr = obj["expire"].split("T")
+
+        # before the T
+        year_month_day = datestr.split("-")
+        dateobj = date(int(year_month_day[0]),
+                       int(year_month_day[1]),
+                       int(year_month_day[2]))
+
+        # after the T
+        # manually parsing iso-8601 times with a colon in the timezone
+        # since the strptime does not support it
+        if timestr[-3] == ":":
+            timestr = timestr[:-3] + timestr[-2:]
+        timeobj = datetime.strptime(timestr, "%H:%M:%S.%f%z").timetz()
+
+        obj["expire"] = datetime.combine(dateobj, timeobj)
+
         if datetime.now(tz.utc) > obj["expire"]:
             raise ValueError("The URL has expired")
 
@@ -275,6 +297,38 @@ class LoginHandler(LoginHandler, LocalBase):
                 {'next': self.get_argument('next', '')},
             ),
         )
+
+    async def post(self):
+        # parse the arguments dict
+        data = {}
+        for arg in self.request.arguments:
+            data[arg] = self.get_argument(arg, strip=False)
+
+        auth_timer = self.statsd.timer('login.authenticate').start()
+        user = await self.login_user(data)
+        auth_timer.stop(send=False)
+
+        if user:
+            # register current user for subsequent requests to user
+            # (e.g. logging the request)
+            self._jupyterhub_user = user
+            self.redirect(self.get_next_url(user))
+        else:
+            # default error mesage on unsuccessful login
+            error = 'Invalid username or password'
+
+            # check is user exists and has correct password,
+            # and is just not authorised
+            nuser = self.authenticator.get_user(data['username'])
+            if nuser is not None:
+                if (nuser.is_valid_password(data['password'])
+                        and not nuser.is_authorized):
+                    error = 'User has not been authorized by administrator yet'
+
+            html = await self._render(
+                login_error=error, username=data['username']
+            )
+            self.finish(html)
 
 
 class DiscardHandler(LocalBase):

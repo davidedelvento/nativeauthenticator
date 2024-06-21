@@ -15,6 +15,7 @@ class UserInfo(Base):
     username = Column(String(128), nullable=False)
     password = Column(LargeBinary, nullable=False)
     is_authorized = Column(Boolean, default=False)
+    login_email_sent = Column(Boolean, default=False)
     email = Column(String(128))
     has_2fa = Column(Boolean, default=False)
     otp_secret = Column(String(16))
@@ -29,6 +30,11 @@ class UserInfo(Base):
         """Find a user info record by name.
         Returns None if not found"""
         return db.query(cls).filter(cls.username == username).first()
+
+    @classmethod
+    def all_users(cls, db):
+        """Returns all available user records."""
+        return db.query(cls).all()
 
     def is_valid_password(self, password):
         """Checks if a password passed matches the
